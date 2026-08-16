@@ -8,7 +8,7 @@ use openmediatransport::{
     VideoFlags,
 };
 
-use crate::config::{PLUGIN_AUTHOR, PLUGIN_LABEL, PluginConfig};
+use crate::config::{PLUGIN_AUTHOR, PLUGIN_LABEL, PluginConfig, QualitySetting};
 use crate::media::ConvertedVideo;
 
 #[derive(Debug, Clone)]
@@ -83,6 +83,7 @@ pub struct SendSession {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     video_slot: Arc<LatestSlot<VideoJob>>,
+    quality: Arc<Mutex<QualitySetting>>,
 }
 
 impl SendSession {
@@ -114,20 +115,21 @@ impl SendSession {
         let stop_thread = Arc::clone(&stop);
         let video_slot = Arc::new(LatestSlot::new());
         let video_slot_thread = Arc::clone(&video_slot);
+        let quality = Arc::new(Mutex::new(config.quality));
+        let quality_thread = Arc::clone(&quality);
         let source_name = config.source_name.clone();
 
         let join = thread::Builder::new()
             .name("openfx-omt-sender".into())
             .spawn(move || {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    sender_loop(
-                        sender,
-                        discovery,
-                        &source_name,
-                        video_slot_thread,
-                        stop_thread,
-                    );
-                }));
+                sender_loop(
+                    sender,
+                    discovery,
+                    &source_name,
+                    video_slot_thread,
+                    quality_thread,
+                    stop_thread,
+                );
             })
             .map_err(|e| format!("failed to spawn OMT sender thread: {e}"))?;
 
@@ -135,11 +137,16 @@ impl SendSession {
             stop,
             join: Some(join),
             video_slot,
+            quality,
         })
     }
 
     pub fn push_video(&self, job: VideoJob) {
         self.video_slot.push(job);
+    }
+
+    pub fn set_quality(&self, quality: QualitySetting) {
+        *self.quality.lock().unwrap_or_else(|e| e.into_inner()) = quality;
     }
 
     pub fn stop(&mut self) {
@@ -162,17 +169,34 @@ fn sender_loop(
     mut discovery: Option<Discovery>,
     source_name: &str,
     video_slot: Arc<LatestSlot<VideoJob>>,
+    quality: Arc<Mutex<QualitySetting>>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Acquire) {
-        let _ = sender.poll_accept();
-        let _ = sender.poll_peer_metadata();
-        if let Some(job) = video_slot.take()
-            && let Err(e) = sender.send_video(video_frame(job))
-        {
-            eprintln!("OMT send_video failed: {e}");
+        let had_job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain_accepts(&mut sender);
+            if let Err(e) = sender.poll_peer_metadata() {
+                eprintln!("OMT poll_peer_metadata failed: {e}");
+            }
+            let current_quality = *quality.lock().unwrap_or_else(|e| e.into_inner());
+            sender.set_quality(current_quality.to_omt());
+            if let Some(job) = video_slot.take() {
+                if let Err(e) = sender.send_video(video_frame(job)) {
+                    eprintln!("OMT send_video failed: {e}");
+                }
+                true
+            } else {
+                false
+            }
+        }));
+        match had_job {
+            Ok(true) => {}
+            Ok(false) => thread::sleep(Duration::from_millis(1)),
+            Err(_) => {
+                eprintln!("OMT sender loop panicked; keeping sender thread alive");
+                thread::sleep(Duration::from_millis(1));
+            }
         }
-        thread::sleep(Duration::from_millis(1));
     }
 
     if let Some(discovery) = discovery.as_mut() {
@@ -180,6 +204,19 @@ fn sender_loop(
     }
     let _ = sender.send_metadata(0, "<OMTMetadata />");
     let _ = Instant::now();
+}
+
+fn drain_accepts(sender: &mut Sender) {
+    loop {
+        match sender.poll_accept() {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => {
+                eprintln!("OMT poll_accept failed: {e}");
+                break;
+            }
+        }
+    }
 }
 
 fn video_frame(job: VideoJob) -> MediaFrame {
@@ -247,10 +284,23 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             join: None,
             video_slot: Arc::new(LatestSlot::new()),
+            quality: Arc::new(Mutex::new(QualitySetting::Default)),
         };
         session.stop();
         session.stop();
         assert!(session.stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn quality_can_be_updated_without_stop() {
+        let session = SendSession {
+            stop: Arc::new(AtomicBool::new(false)),
+            join: None,
+            video_slot: Arc::new(LatestSlot::new()),
+            quality: Arc::new(Mutex::new(QualitySetting::Default)),
+        };
+        session.set_quality(QualitySetting::High);
+        assert_eq!(*session.quality.lock().unwrap(), QualitySetting::High);
     }
 
     #[test]

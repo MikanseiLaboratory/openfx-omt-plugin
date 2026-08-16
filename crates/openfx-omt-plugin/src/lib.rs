@@ -18,7 +18,7 @@ use openfx::bindings::{
     kOfxActionUnload, kOfxBitDepthByte, kOfxBitDepthFloat, kOfxBitDepthShort,
     kOfxImageComponentRGB, kOfxImageComponentRGBA, kOfxImageEffectActionDescribeInContext,
     kOfxImageEffectActionRender, kOfxImageEffectContextFilter, kOfxImageEffectContextGeneral,
-    kOfxImageEffectOutputClipName, kOfxImageEffectPluginPropGrouping,
+    kOfxImageEffectFrameVarying, kOfxImageEffectOutputClipName, kOfxImageEffectPluginPropGrouping,
     kOfxImageEffectPluginPropHostFrameThreading, kOfxImageEffectPluginRenderThreadSafety,
     kOfxImageEffectPropFrameRate, kOfxImageEffectPropRenderWindow,
     kOfxImageEffectPropSupportedComponents, kOfxImageEffectPropSupportedContexts,
@@ -180,6 +180,9 @@ fn action_describe_in_context(effect: OfxImageEffectHandle) -> OfxResult<()> {
             kOfxImageComponentRGB,
         )?;
         clip.set_int(kOfxImageEffectPropSupportsTiles, 0, 0)?;
+        if name == kOfxImageEffectOutputClipName {
+            let _ = clip.set_int(kOfxImageEffectFrameVarying, 0, 1);
+        }
     }
     params::describe(suites, effect)
 }
@@ -229,8 +232,8 @@ fn action_render(effect: OfxImageEffectHandle, in_args: OfxPropertySetHandle) ->
     pixels::copy_image_window(&source, &output, window)?;
 
     let instance = get_instance_data::<PluginInstance>(suites, effect)?;
-    instance.sync_from_params(effect, time)?;
-    if !instance.config_snapshot().enabled || !instance.should_send(time) {
+    let _ = instance.sync_from_params(effect, time);
+    if !instance.config_snapshot().enabled {
         return Ok(());
     }
 

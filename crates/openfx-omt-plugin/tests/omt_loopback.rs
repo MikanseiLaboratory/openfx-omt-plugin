@@ -28,9 +28,20 @@ fn solid_bgra(size: u32, r: u8, g: u8, b: u8, a: u8) -> ConvertedVideo {
         x2: size as i32,
         y2: size as i32,
     };
-    convert_window_to_bgra(window, PixelDepth::Byte, PixelComponents::Rgba, |_, _| {
-        Some(vec![r, g, b, a])
-    })
+    let mut src = vec![0u8; (size * size * 4) as usize];
+    for px in src.chunks_exact_mut(4) {
+        px.copy_from_slice(&[r, g, b, a]);
+    }
+    unsafe {
+        convert_window_to_bgra(
+            window,
+            window,
+            (size * 4) as i32,
+            src.as_ptr(),
+            PixelDepth::Byte,
+            PixelComponents::Rgba,
+        )
+    }
     .expect("convert")
 }
 

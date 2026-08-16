@@ -13,14 +13,15 @@ pub struct PluginInstance {
     pub suites: Suites,
     config: Mutex<PluginConfig>,
     session: Mutex<Option<SendSession>>,
-    last_sent_time: DuplicateTimeGuard,
     clock: Mutex<SessionClock>,
 }
 
+#[cfg(test)]
 pub struct DuplicateTimeGuard {
     last: Mutex<Option<OfxTime>>,
 }
 
+#[cfg(test)]
 impl DuplicateTimeGuard {
     pub fn new() -> Self {
         Self {
@@ -38,6 +39,7 @@ impl DuplicateTimeGuard {
     }
 }
 
+#[cfg(test)]
 impl Default for DuplicateTimeGuard {
     fn default() -> Self {
         Self::new()
@@ -51,7 +53,6 @@ impl PluginInstance {
             suites,
             config: Mutex::new(config.clone()),
             session: Mutex::new(None),
-            last_sent_time: DuplicateTimeGuard::new(),
             clock: Mutex::new(SessionClock::new()),
         };
         instance.apply_config(config);
@@ -59,7 +60,9 @@ impl PluginInstance {
     }
 
     pub fn sync_from_params(&self, effect: OfxImageEffectHandle, time: OfxTime) -> OfxResult<()> {
-        let config = params::read_config(&self.suites, effect, time)?;
+        let Ok(config) = params::read_config(&self.suites, effect, time) else {
+            return Ok(());
+        };
         let changed = {
             let current = self.config.lock().unwrap_or_else(|e| e.into_inner());
             *current != config
@@ -71,20 +74,35 @@ impl PluginInstance {
     }
 
     pub fn apply_config(&self, config: PluginConfig) {
-        {
+        let previous = {
             let mut current = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = current.clone();
             *current = config.clone();
-        }
+            previous
+        };
         let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = session.as_mut() {
-            existing.stop();
+        if !config.enabled {
+            if let Some(existing) = session.as_mut() {
+                existing.stop();
+            }
+            *session = None;
+            return;
         }
-        *session = None;
-        if config.enabled {
+        if session.is_none() || config.needs_sender_restart(&previous) {
+            if let Some(existing) = session.as_mut() {
+                existing.stop();
+            }
+            *session = None;
             match SendSession::start(config) {
                 Ok(started) => *session = Some(started),
                 Err(err) => eprintln!("OMT sender start failed: {err}"),
             }
+            return;
+        }
+        if previous.quality != config.quality
+            && let Some(existing) = session.as_mut()
+        {
+            existing.set_quality(config.quality);
         }
     }
 
@@ -93,10 +111,6 @@ impl PluginInstance {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-    }
-
-    pub fn should_send(&self, time: OfxTime) -> bool {
-        self.last_sent_time.should_send(time)
     }
 
     pub fn next_timestamp(&self) -> i64 {
@@ -157,8 +171,14 @@ mod tests {
         let mut b = a.clone();
         b.quality = QualitySetting::High;
         assert_ne!(a, b);
+        assert!(!a.needs_sender_restart(&b));
+        assert!(!b.needs_sender_restart(&a));
         b = a.clone();
         b.enabled = false;
         assert_ne!(a, b);
+        assert!(a.needs_sender_restart(&b));
+        b = a.clone();
+        b.source_name = "Other".into();
+        assert!(a.needs_sender_restart(&b));
     }
 }

@@ -79,6 +79,11 @@ impl PluginConfig {
         }
         self
     }
+
+    /// Restarting the sender drops TCP peers and DNS-SD. Quality can be applied live.
+    pub fn needs_sender_restart(&self, previous: &Self) -> bool {
+        self.enabled != previous.enabled || self.source_name != previous.source_name
+    }
 }
 
 pub fn fps_to_rational(fps: f64) -> (i32, i32) {
@@ -138,5 +143,15 @@ mod tests {
         assert_eq!(fps_to_rational(60.0), (60, 1));
         assert_eq!(fps_to_rational(0.0), (60, 1));
         assert_eq!(fps_to_rational(f64::NAN), (60, 1));
+    }
+
+    #[test]
+    fn quality_change_does_not_restart_sender() {
+        let previous = PluginConfig::default();
+        let mut next = previous.clone();
+        next.quality = QualitySetting::High;
+        assert!(!next.needs_sender_restart(&previous));
+        next.enabled = false;
+        assert!(next.needs_sender_restart(&previous));
     }
 }

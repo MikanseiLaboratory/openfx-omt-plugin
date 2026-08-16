@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::config::{MIN_VIDEO_DIM, TICKS_PER_SECOND};
-use openfx::image::{PixelComponents, PixelDepth, RectI};
+use openfx::image::{PixelComponents, PixelDepth, RectI, pixel_byte_offset};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaError {
@@ -73,6 +73,7 @@ pub fn video_interval_ticks(fps_n: i32, fps_d: i32) -> i64 {
     (TICKS_PER_SECOND * d) / n
 }
 
+#[cfg(test)]
 fn sample_u8(depth: PixelDepth, bytes: &[u8]) -> u8 {
     match depth {
         PixelDepth::Byte => bytes[0],
@@ -87,6 +88,7 @@ fn sample_u8(depth: PixelDepth, bytes: &[u8]) -> u8 {
     }
 }
 
+#[cfg(test)]
 pub fn packed_row_to_bgra_pixel(
     depth: PixelDepth,
     components: PixelComponents,
@@ -106,13 +108,25 @@ pub fn packed_row_to_bgra_pixel(
 
 /// Convert an OFX image window to tightly packed top-down BGRA8.
 ///
-/// `row` is called as `row(x, y) -> pixel bytes` where `(x, y)` are OFX coordinates.
-pub fn convert_window_to_bgra(
+/// `data` is `kOfxImagePropData`. `row_bytes` may be negative.
+///
+/// # Safety
+/// `data` must remain valid for `bounds` / `row_bytes` for the duration of the call.
+pub unsafe fn convert_window_to_bgra(
     window: RectI,
+    bounds: RectI,
+    row_bytes: i32,
+    data: *const u8,
     depth: PixelDepth,
     components: PixelComponents,
-    mut pixel: impl FnMut(i32, i32) -> Option<Vec<u8>>,
 ) -> Result<ConvertedVideo, MediaError> {
+    let mut window = window;
+    if window.width() % 2 != 0 {
+        window.x2 -= 1;
+    }
+    if window.height() % 2 != 0 {
+        window.y2 -= 1;
+    }
     let width = window.width();
     let height = window.height();
     if width <= 0 || height <= 0 {
@@ -127,28 +141,34 @@ pub fn convert_window_to_bgra(
     let bpp = depth.bytes_per_channel() * components.count();
     let stride = (width as usize).saturating_mul(4);
     let mut bgra = vec![0u8; stride.saturating_mul(height as usize)];
-    let mut has_alpha = false;
+    let x1 = window.x1.max(bounds.x1);
+    let x2 = window.x2.min(bounds.x2);
+    if x2 <= x1 {
+        return Err(MediaError::EmptyWindow);
+    }
+    let count = (x2 - x1) as usize;
+    let dst_x0 = (x1 - window.x1) as usize;
 
+    let mut has_alpha = false;
     for out_y in 0..height as i32 {
         let src_y = window.y2 - 1 - out_y;
-        for out_x in 0..width as i32 {
-            let src_x = window.x1 + out_x;
-            let Some(bytes) = pixel(src_x, src_y) else {
-                continue;
-            };
-            if bytes.len() < bpp {
-                continue;
-            }
-            let [b, g, r, a] = packed_row_to_bgra_pixel(depth, components, &bytes);
-            if a != 255 {
-                has_alpha = true;
-            }
-            let dst = (out_y as usize * stride) + (out_x as usize * 4);
-            bgra[dst] = b;
-            bgra[dst + 1] = g;
-            bgra[dst + 2] = r;
-            bgra[dst + 3] = a;
+        if src_y < bounds.y1 || src_y >= bounds.y2 {
+            continue;
         }
+        let Ok(offset) = pixel_byte_offset(bounds, row_bytes, bpp, x1, src_y) else {
+            continue;
+        };
+        let src = unsafe { data.offset(offset) };
+        let dst_row = out_y as usize * stride + dst_x0 * 4;
+        has_alpha |= unsafe {
+            write_bgra_row(
+                depth,
+                components,
+                src,
+                &mut bgra[dst_row..dst_row + count * 4],
+                count,
+            )
+        };
     }
 
     Ok(ConvertedVideo {
@@ -158,6 +178,52 @@ pub fn convert_window_to_bgra(
         bgra,
         has_alpha,
     })
+}
+
+unsafe fn write_bgra_row(
+    depth: PixelDepth,
+    components: PixelComponents,
+    src: *const u8,
+    dst: &mut [u8],
+    count: usize,
+) -> bool {
+    let ch = depth.bytes_per_channel();
+    let src_bpp = ch * components.count();
+    let mut has_alpha = false;
+    for i in 0..count {
+        let px = unsafe { src.add(i * src_bpp) };
+        let r = unsafe { sample_u8_ptr(depth, px) };
+        let g = unsafe { sample_u8_ptr(depth, px.add(ch)) };
+        let b = unsafe { sample_u8_ptr(depth, px.add(ch * 2)) };
+        let a = if components == PixelComponents::Rgba {
+            unsafe { sample_u8_ptr(depth, px.add(ch * 3)) }
+        } else {
+            255
+        };
+        if a != 255 {
+            has_alpha = true;
+        }
+        let o = i * 4;
+        dst[o] = b;
+        dst[o + 1] = g;
+        dst[o + 2] = r;
+        dst[o + 3] = a;
+    }
+    has_alpha
+}
+
+unsafe fn sample_u8_ptr(depth: PixelDepth, ptr: *const u8) -> u8 {
+    match depth {
+        PixelDepth::Byte => unsafe { *ptr },
+        PixelDepth::Short => {
+            let bytes = unsafe { [*ptr, *ptr.add(1)] };
+            (u16::from_le_bytes(bytes) >> 8) as u8
+        }
+        PixelDepth::Float => {
+            let bytes = unsafe { [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)] };
+            (f32::from_le_bytes(bytes).clamp(0.0, 1.0) * 255.0).round() as u8
+        }
+    }
 }
 
 #[cfg(test)]
@@ -189,11 +255,40 @@ mod tests {
             x2: 8,
             y2: 8,
         };
-        let err =
-            convert_window_to_bgra(window, PixelDepth::Byte, PixelComponents::Rgba, |_, _| {
-                Some(vec![1, 2, 3, 255])
-            })
-            .unwrap_err();
+        let err = unsafe {
+            convert_window_to_bgra(
+                window,
+                window,
+                32,
+                [0u8; 8 * 8 * 4].as_ptr(),
+                PixelDepth::Byte,
+                PixelComponents::Rgba,
+            )
+        }
+        .unwrap_err();
         assert!(matches!(err, MediaError::TooSmall { .. }));
+    }
+
+    #[test]
+    fn even_aligns_odd_windows() {
+        let window = RectI {
+            x1: 0,
+            y1: 0,
+            x2: 17,
+            y2: 17,
+        };
+        let converted = unsafe {
+            convert_window_to_bgra(
+                window,
+                window,
+                17 * 4,
+                [0u8; 17 * 17 * 4].as_ptr(),
+                PixelDepth::Byte,
+                PixelComponents::Rgba,
+            )
+        }
+        .expect("odd window should crop to even");
+        assert_eq!(converted.width, 16);
+        assert_eq!(converted.height, 16);
     }
 }

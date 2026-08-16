@@ -27,26 +27,22 @@ pub fn copy_image_window(src: &ClipImage<'_>, dst: &ClipImage<'_>, window: RectI
 }
 
 pub fn image_to_bgra(image: &ClipImage<'_>, window: RectI) -> Result<ConvertedVideo, MediaError> {
-    convert_window_to_bgra(window, image.depth, image.components, |x, y| {
-        if x < image.bounds.x1
-            || x >= image.bounds.x2
-            || y < image.bounds.y1
-            || y >= image.bounds.y2
-        {
-            return None;
-        }
-        let bpp = image.bytes_per_pixel();
-        unsafe {
-            let ptr = image.pixel_ptr(x, y).ok()?;
-            Some(std::slice::from_raw_parts(ptr, bpp).to_vec())
-        }
-    })
+    unsafe {
+        convert_window_to_bgra(
+            window,
+            image.bounds,
+            image.row_bytes,
+            image.data,
+            image.depth,
+            image.components,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::packed_row_to_bgra_pixel;
+    use crate::media::{convert_window_to_bgra, packed_row_to_bgra_pixel};
     use openfx::image::{PixelComponents, PixelDepth};
 
     fn convert_buffer(
@@ -63,16 +59,9 @@ mod tests {
             x2: width,
             y2: height,
         };
-        convert_window_to_bgra(window, depth, components, |x, y| {
-            let bpp = depth.bytes_per_channel() * components.count();
-            let offset = if row_bytes >= 0 {
-                y * row_bytes + x * bpp as i32
-            } else {
-                (height - 1 - y) * row_bytes.abs() + x * bpp as i32
-            };
-            let start = offset as usize;
-            Some(data[start..start + bpp].to_vec())
-        })
+        unsafe {
+            convert_window_to_bgra(window, window, row_bytes, data.as_ptr(), depth, components)
+        }
         .unwrap()
     }
 
@@ -150,14 +139,24 @@ mod tests {
         let stride = width * bpp;
         let mut src = vec![0u8; (stride * height) as usize];
         src[0..4].copy_from_slice(&[9, 8, 7, 255]);
-        let converted = convert_buffer(
-            width,
-            height,
-            PixelDepth::Byte,
-            PixelComponents::Rgba,
-            -stride,
-            &src,
-        );
+        let window = RectI {
+            x1: 0,
+            y1: 0,
+            x2: width,
+            y2: height,
+        };
+        let data = unsafe { src.as_ptr().add(((height - 1) * stride) as usize) };
+        let converted = unsafe {
+            convert_window_to_bgra(
+                window,
+                window,
+                -stride,
+                data,
+                PixelDepth::Byte,
+                PixelComponents::Rgba,
+            )
+        }
+        .unwrap();
         assert_eq!(&converted.bgra[0..4], &[7, 8, 9, 255]);
     }
 
