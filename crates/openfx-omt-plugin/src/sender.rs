@@ -1,0 +1,277 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use openmediatransport::{
+    Codec, ColorSpace, Discovery, FrameType, MediaFrame, Sender, SenderConfig, SenderInfo,
+    VideoFlags,
+};
+
+use crate::config::{PLUGIN_AUTHOR, PLUGIN_LABEL, PluginConfig};
+use crate::media::ConvertedVideo;
+
+#[derive(Debug, Clone)]
+pub struct VideoJob {
+    pub width: u32,
+    pub height: u32,
+    pub stride: i32,
+    pub bgra: Vec<u8>,
+    pub has_alpha: bool,
+    pub timestamp: i64,
+    pub fps_n: i32,
+    pub fps_d: i32,
+}
+
+impl From<ConvertedVideo> for VideoJob {
+    fn from(value: ConvertedVideo) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            stride: value.stride,
+            bgra: value.bgra,
+            has_alpha: value.has_alpha,
+            timestamp: 0,
+            fps_n: 60,
+            fps_d: 1,
+        }
+    }
+}
+
+/// Depth-1 latest-wins slot. Pushing while occupied drops the older value.
+#[derive(Debug)]
+pub struct LatestSlot<T> {
+    slot: Mutex<Option<T>>,
+    drops: AtomicU64,
+}
+
+impl<T> LatestSlot<T> {
+    pub fn new() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            drops: AtomicU64::new(0),
+        }
+    }
+
+    pub fn push(&self, item: T) {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.replace(item).is_some() {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn take(&self) -> Option<T> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub fn clear(&self) {
+        let _ = self.take();
+    }
+
+    pub fn drops(&self) -> u64 {
+        self.drops.load(Ordering::Relaxed)
+    }
+}
+
+impl<T> Default for LatestSlot<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct SendSession {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+    video_slot: Arc<LatestSlot<VideoJob>>,
+}
+
+impl SendSession {
+    pub fn start(config: PluginConfig) -> Result<Self, String> {
+        let mut sender = Sender::create_with_config(
+            config.source_name.clone(),
+            FrameType::VIDEO | FrameType::METADATA,
+            SenderConfig {
+                send_queue_depth: crate::config::DEFAULT_QUEUE_DEPTH,
+                ..SenderConfig::default()
+            },
+        )
+        .map_err(|e| format!("OMT sender create failed: {e}"))?;
+        sender.set_quality(config.quality.to_omt());
+        sender.set_sender_info(SenderInfo::new(
+            PLUGIN_LABEL,
+            PLUGIN_AUTHOR,
+            env!("CARGO_PKG_VERSION"),
+        ));
+
+        let mut discovery = Discovery::new().ok();
+        if let Some(discovery) = discovery.as_mut()
+            && let Err(e) = discovery.register(&config.source_name, sender.port())
+        {
+            eprintln!("OMT DNS-SD register failed: {e}");
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let video_slot = Arc::new(LatestSlot::new());
+        let video_slot_thread = Arc::clone(&video_slot);
+        let source_name = config.source_name.clone();
+
+        let join = thread::Builder::new()
+            .name("openfx-omt-sender".into())
+            .spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sender_loop(
+                        sender,
+                        discovery,
+                        &source_name,
+                        video_slot_thread,
+                        stop_thread,
+                    );
+                }));
+            })
+            .map_err(|e| format!("failed to spawn OMT sender thread: {e}"))?;
+
+        Ok(Self {
+            stop,
+            join: Some(join),
+            video_slot,
+        })
+    }
+
+    pub fn push_video(&self, job: VideoJob) {
+        self.video_slot.push(job);
+    }
+
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+        self.video_slot.clear();
+    }
+}
+
+impl Drop for SendSession {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn sender_loop(
+    mut sender: Sender,
+    mut discovery: Option<Discovery>,
+    source_name: &str,
+    video_slot: Arc<LatestSlot<VideoJob>>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Acquire) {
+        let _ = sender.poll_accept();
+        let _ = sender.poll_peer_metadata();
+        if let Some(job) = video_slot.take()
+            && let Err(e) = sender.send_video(video_frame(job))
+        {
+            eprintln!("OMT send_video failed: {e}");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    if let Some(discovery) = discovery.as_mut() {
+        let _ = discovery.deregister(source_name);
+    }
+    let _ = sender.send_metadata(0, "<OMTMetadata />");
+    let _ = Instant::now();
+}
+
+fn video_frame(job: VideoJob) -> MediaFrame {
+    let flags = if job.has_alpha {
+        VideoFlags::ALPHA
+    } else {
+        VideoFlags::NONE
+    };
+    MediaFrame {
+        frame_type: FrameType::VIDEO,
+        timestamp: job.timestamp,
+        codec: Codec::Bgra as i32,
+        width: job.width as i32,
+        height: job.height as i32,
+        stride: job.stride,
+        flags,
+        frame_rate_n: job.fps_n,
+        frame_rate_d: job.fps_d,
+        aspect_ratio: if job.height == 0 {
+            1.0
+        } else {
+            job.width as f32 / job.height as f32
+        },
+        color_space: ColorSpace::Bt709,
+        data: job.bgra,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latest_slot_drops_old() {
+        let slot = LatestSlot::new();
+        slot.push(1);
+        slot.push(2);
+        assert_eq!(slot.take(), Some(2));
+        assert_eq!(slot.drops(), 1);
+        assert_eq!(slot.take(), None);
+    }
+
+    #[test]
+    fn latest_wins_under_contention() {
+        let slot = Arc::new(LatestSlot::new());
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let slot = Arc::clone(&slot);
+            handles.push(thread::spawn(move || {
+                for j in 0..50 {
+                    slot.push(i * 100 + j);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert!(slot.take().is_some());
+    }
+
+    #[test]
+    fn stop_is_idempotent() {
+        let mut session = SendSession {
+            stop: Arc::new(AtomicBool::new(false)),
+            join: None,
+            video_slot: Arc::new(LatestSlot::new()),
+        };
+        session.stop();
+        session.stop();
+        assert!(session.stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn send_session_start_and_stop() {
+        let mut session = SendSession::start(PluginConfig {
+            enabled: true,
+            source_name: "openfx-omt-stop-test".into(),
+            quality: crate::config::QualitySetting::Low,
+        })
+        .expect("start sender");
+        session.push_video(VideoJob {
+            width: 16,
+            height: 16,
+            stride: 64,
+            bgra: vec![0u8; 16 * 16 * 4],
+            has_alpha: false,
+            timestamp: 1,
+            fps_n: 60,
+            fps_d: 1,
+        });
+        session.stop();
+        session.stop();
+    }
+}

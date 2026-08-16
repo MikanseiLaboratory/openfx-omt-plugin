@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-alpha.*"
+      - "v*.*.*-beta.*"
+      - "v*.*.*-rc.*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Install LLVM
+        run: choco install llvm --yes --no-progress
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: ./scripts/version.ps1
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked -- --test-threads=1
+      - name: Release build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./scripts/package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openfx-omt-plugin-v${{ steps.version.outputs.version }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: openfx-omt-plugin-v${{ needs.build.outputs.version }}
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          prerelease: ${{ needs.build.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.build.outputs.prerelease != 'true' }}

@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/openfx", "crates/openfx-omt-plugin"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+authors = ["MikanseiLaboratory"]
+repository = "https://github.com/MikanseiLaboratory/openfx-omt-plugin"
+
+[workspace.dependencies]
+bindgen = "0.72"
+openfx = { path = "crates/openfx" }
+openmediatransport = { git = "https://github.com/MikanseiLaboratory/openmediatransport-rs", rev = "55ffd08ab899f8017056886157fb0d130ab36d5c" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

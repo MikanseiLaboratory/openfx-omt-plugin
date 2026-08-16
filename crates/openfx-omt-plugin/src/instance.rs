@@ -1,0 +1,164 @@
+use std::sync::Mutex;
+
+use openfx::bindings::{OfxImageEffectHandle, OfxTime};
+use openfx::status::OfxResult;
+use openfx::suites::Suites;
+
+use crate::config::PluginConfig;
+use crate::media::SessionClock;
+use crate::params;
+use crate::sender::{SendSession, VideoJob};
+
+pub struct PluginInstance {
+    pub suites: Suites,
+    config: Mutex<PluginConfig>,
+    session: Mutex<Option<SendSession>>,
+    last_sent_time: DuplicateTimeGuard,
+    clock: Mutex<SessionClock>,
+}
+
+pub struct DuplicateTimeGuard {
+    last: Mutex<Option<OfxTime>>,
+}
+
+impl DuplicateTimeGuard {
+    pub fn new() -> Self {
+        Self {
+            last: Mutex::new(None),
+        }
+    }
+
+    pub fn should_send(&self, time: OfxTime) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if *last == Some(time) {
+            return false;
+        }
+        *last = Some(time);
+        true
+    }
+}
+
+impl Default for DuplicateTimeGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PluginInstance {
+    pub fn create(suites: Suites, effect: OfxImageEffectHandle) -> OfxResult<Self> {
+        let config = params::read_config(&suites, effect, 0.0)?;
+        let instance = Self {
+            suites,
+            config: Mutex::new(config.clone()),
+            session: Mutex::new(None),
+            last_sent_time: DuplicateTimeGuard::new(),
+            clock: Mutex::new(SessionClock::new()),
+        };
+        instance.apply_config(config);
+        Ok(instance)
+    }
+
+    pub fn sync_from_params(&self, effect: OfxImageEffectHandle, time: OfxTime) -> OfxResult<()> {
+        let config = params::read_config(&self.suites, effect, time)?;
+        let changed = {
+            let current = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            *current != config
+        };
+        if changed {
+            self.apply_config(config);
+        }
+        Ok(())
+    }
+
+    pub fn apply_config(&self, config: PluginConfig) {
+        {
+            let mut current = self.config.lock().unwrap_or_else(|e| e.into_inner());
+            *current = config.clone();
+        }
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = session.as_mut() {
+            existing.stop();
+        }
+        *session = None;
+        if config.enabled {
+            match SendSession::start(config) {
+                Ok(started) => *session = Some(started),
+                Err(err) => eprintln!("OMT sender start failed: {err}"),
+            }
+        }
+    }
+
+    pub fn config_snapshot(&self) -> PluginConfig {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn should_send(&self, time: OfxTime) -> bool {
+        self.last_sent_time.should_send(time)
+    }
+
+    pub fn next_timestamp(&self) -> i64 {
+        self.clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_monotonic()
+    }
+
+    pub fn push_video(&self, job: VideoJob) {
+        if let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            session.push_video(job);
+        }
+    }
+
+    pub fn shutdown(&self) {
+        if let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            session.stop();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::QualitySetting;
+
+    #[test]
+    fn duplicate_times_are_suppressed() {
+        let guard = DuplicateTimeGuard::new();
+        assert!(guard.should_send(1.0));
+        assert!(!guard.should_send(1.0));
+        assert!(guard.should_send(2.0));
+    }
+
+    #[test]
+    fn timestamps_are_monotonic() {
+        let mut clock = SessionClock::new();
+        let a = clock.next_monotonic();
+        let b = clock.next_monotonic();
+        assert!(b > a);
+        assert!(a >= 0);
+    }
+
+    #[test]
+    fn config_equality_detects_restart() {
+        let a = PluginConfig::default();
+        let mut b = a.clone();
+        b.quality = QualitySetting::High;
+        assert_ne!(a, b);
+        b = a.clone();
+        b.enabled = false;
+        assert_ne!(a, b);
+    }
+}
