@@ -1,19 +1,20 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use openfx::bindings::{OfxImageEffectHandle, OfxTime};
 use openfx::status::OfxResult;
 use openfx::suites::Suites;
 
 use crate::config::PluginConfig;
-use crate::media::SessionClock;
 use crate::params;
 use crate::sender::{SendSession, VideoJob};
+use openfx_pixels::{PixelPool, SessionClock};
 
 pub struct PluginInstance {
     pub suites: Suites,
     config: Mutex<PluginConfig>,
     session: Mutex<Option<SendSession>>,
     clock: Mutex<SessionClock>,
+    bgra_pool: Arc<PixelPool>,
 }
 
 #[cfg(test)]
@@ -54,6 +55,7 @@ impl PluginInstance {
             config: Mutex::new(config.clone()),
             session: Mutex::new(None),
             clock: Mutex::new(SessionClock::new()),
+            bgra_pool: Arc::new(PixelPool::new()),
         };
         instance.apply_config(config);
         Ok(instance)
@@ -93,7 +95,7 @@ impl PluginInstance {
                 existing.stop();
             }
             *session = None;
-            match SendSession::start(config) {
+            match SendSession::start_with_pool(config, Arc::clone(&self.bgra_pool)) {
                 Ok(started) => *session = Some(started),
                 Err(err) => eprintln!("OMT sender start failed: {err}"),
             }
@@ -111,6 +113,10 @@ impl PluginInstance {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub fn bgra_pool(&self) -> &PixelPool {
+        &self.bgra_pool
     }
 
     pub fn next_timestamp(&self) -> i64 {

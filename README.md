@@ -35,7 +35,7 @@ Resolve を終了してから `C:\Program Files\Common Files\OFX\Plugins\OpenFXO
 
 ## 開発
 
-ビルドには Rust 1.97 と LLVM（bindgen / libclang）が必要です。
+ビルドには Rust 1.97 と LLVM（bindgen / libclang）が必要です。OpenFX ヘルパーと画素変換は [openfx-pixels](https://github.com/MikanseiLaboratory/openfx-pixels) を git revision で参照します。
 
 ```powershell
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"

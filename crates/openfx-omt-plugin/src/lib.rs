@@ -1,12 +1,13 @@
 mod config;
 mod instance;
-mod media;
 mod params;
 mod pixels;
 mod sender;
 
 pub use config::{PluginConfig, QualitySetting, fps_to_rational};
-pub use media::{ConvertedVideo, SessionClock, convert_window_to_bgra, video_interval_ticks};
+pub use openfx_pixels::{
+    ConvertedVideo, SessionClock, convert_window_to_bgra, video_interval_ticks,
+};
 pub use sender::{LatestSlot, SendSession, VideoJob};
 
 use std::ffi::{CStr, c_char, c_void};
@@ -243,12 +244,13 @@ fn action_render(effect: OfxImageEffectHandle, in_args: OfxPropertySetHandle) ->
         .and_then(|props| props.get_double(kOfxImageEffectPropFrameRate, 0).ok())
         .unwrap_or(60.0);
     let (fps_n, fps_d) = fps_to_rational(fps);
-    match pixels::image_to_bgra(&source, window) {
+    match pixels::image_to_bgra(&source, window, Some(instance.bgra_pool())) {
         Ok(converted) => {
             let mut job = VideoJob::from(converted);
             job.timestamp = instance.next_timestamp();
             job.fps_n = fps_n;
             job.fps_d = fps_d;
+            job.ofx_time = time;
             instance.push_video(job);
         }
         Err(err) => eprintln!("OMT frame convert skipped: {err}"),

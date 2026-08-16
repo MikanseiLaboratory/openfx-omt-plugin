@@ -9,7 +9,7 @@ use openmediatransport::{
 };
 
 use crate::config::{PLUGIN_AUTHOR, PLUGIN_LABEL, PluginConfig, QualitySetting};
-use crate::media::ConvertedVideo;
+use openfx_pixels::{ConvertedVideo, PixelPool, packed_frame_hash};
 
 #[derive(Debug, Clone)]
 pub struct VideoJob {
@@ -21,6 +21,7 @@ pub struct VideoJob {
     pub timestamp: i64,
     pub fps_n: i32,
     pub fps_d: i32,
+    pub ofx_time: f64,
 }
 
 impl From<ConvertedVideo> for VideoJob {
@@ -29,11 +30,12 @@ impl From<ConvertedVideo> for VideoJob {
             width: value.width,
             height: value.height,
             stride: value.stride,
-            bgra: value.bgra,
+            bgra: value.data,
             has_alpha: value.has_alpha,
             timestamp: 0,
             fps_n: 60,
             fps_d: 1,
+            ofx_time: 0.0,
         }
     }
 }
@@ -54,10 +56,16 @@ impl<T> LatestSlot<T> {
     }
 
     pub fn push(&self, item: T) {
+        drop(self.push_replacing(item));
+    }
+
+    pub fn push_replacing(&self, item: T) -> Option<T> {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.replace(item).is_some() {
+        let old = slot.replace(item);
+        if old.is_some() {
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
+        old
     }
 
     pub fn take(&self) -> Option<T> {
@@ -84,10 +92,15 @@ pub struct SendSession {
     join: Option<JoinHandle<()>>,
     video_slot: Arc<LatestSlot<VideoJob>>,
     quality: Arc<Mutex<QualitySetting>>,
+    pool: Arc<PixelPool>,
 }
 
 impl SendSession {
     pub fn start(config: PluginConfig) -> Result<Self, String> {
+        Self::start_with_pool(config, Arc::new(PixelPool::new()))
+    }
+
+    pub fn start_with_pool(config: PluginConfig, pool: Arc<PixelPool>) -> Result<Self, String> {
         let mut sender = Sender::create_with_config(
             config.source_name.clone(),
             FrameType::VIDEO | FrameType::METADATA,
@@ -117,6 +130,7 @@ impl SendSession {
         let video_slot_thread = Arc::clone(&video_slot);
         let quality = Arc::new(Mutex::new(config.quality));
         let quality_thread = Arc::clone(&quality);
+        let pool_thread = Arc::clone(&pool);
         let source_name = config.source_name.clone();
 
         let join = thread::Builder::new()
@@ -128,6 +142,7 @@ impl SendSession {
                     &source_name,
                     video_slot_thread,
                     quality_thread,
+                    pool_thread,
                     stop_thread,
                 );
             })
@@ -138,11 +153,14 @@ impl SendSession {
             join: Some(join),
             video_slot,
             quality,
+            pool,
         })
     }
 
     pub fn push_video(&self, job: VideoJob) {
-        self.video_slot.push(job);
+        if let Some(old) = self.video_slot.push_replacing(job) {
+            self.pool.release(old.bgra);
+        }
     }
 
     pub fn set_quality(&self, quality: QualitySetting) {
@@ -154,7 +172,9 @@ impl SendSession {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
-        self.video_slot.clear();
+        if let Some(job) = self.video_slot.take() {
+            self.pool.release(job.bgra);
+        }
     }
 }
 
@@ -170,8 +190,13 @@ fn sender_loop(
     source_name: &str,
     video_slot: Arc<LatestSlot<VideoJob>>,
     quality: Arc<Mutex<QualitySetting>>,
+    pool: Arc<PixelPool>,
     stop: Arc<AtomicBool>,
 ) {
+    let mut applied_quality: Option<QualitySetting> = None;
+    let mut last_time = f64::NAN;
+    let mut last_wh = (0u32, 0u32);
+    let mut last_hash = 0u64;
     while !stop.load(Ordering::Acquire) {
         let had_job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drain_accepts(&mut sender);
@@ -179,8 +204,22 @@ fn sender_loop(
                 eprintln!("OMT poll_peer_metadata failed: {e}");
             }
             let current_quality = *quality.lock().unwrap_or_else(|e| e.into_inner());
-            sender.set_quality(current_quality.to_omt());
+            if applied_quality != Some(current_quality) {
+                sender.set_quality(current_quality.to_omt());
+                applied_quality = Some(current_quality);
+            }
             if let Some(job) = video_slot.take() {
+                let hash = packed_frame_hash(job.width, job.height, &job.bgra);
+                if job.ofx_time == last_time
+                    && last_wh == (job.width, job.height)
+                    && hash == last_hash
+                {
+                    pool.release(job.bgra);
+                    return true;
+                }
+                last_time = job.ofx_time;
+                last_wh = (job.width, job.height);
+                last_hash = hash;
                 if let Err(e) = sender.send_video(video_frame(job)) {
                     eprintln!("OMT send_video failed: {e}");
                 }
@@ -285,6 +324,7 @@ mod tests {
             join: None,
             video_slot: Arc::new(LatestSlot::new()),
             quality: Arc::new(Mutex::new(QualitySetting::Default)),
+            pool: Arc::new(PixelPool::new()),
         };
         session.stop();
         session.stop();
@@ -298,6 +338,7 @@ mod tests {
             join: None,
             video_slot: Arc::new(LatestSlot::new()),
             quality: Arc::new(Mutex::new(QualitySetting::Default)),
+            pool: Arc::new(PixelPool::new()),
         };
         session.set_quality(QualitySetting::High);
         assert_eq!(*session.quality.lock().unwrap(), QualitySetting::High);
@@ -320,6 +361,7 @@ mod tests {
             timestamp: 1,
             fps_n: 60,
             fps_d: 1,
+            ofx_time: 0.0,
         });
         session.stop();
         session.stop();

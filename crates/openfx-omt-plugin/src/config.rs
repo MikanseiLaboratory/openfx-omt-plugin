@@ -7,8 +7,6 @@ pub const PLUGIN_AUTHOR: &str = "未完成成果物研究所";
 pub const DEFAULT_SOURCE_NAME: &str = "DaVinci Resolve";
 pub const MAX_SOURCE_NAME_LEN: usize = 63;
 pub const DEFAULT_QUEUE_DEPTH: usize = 4;
-pub const MIN_VIDEO_DIM: u32 = 16;
-pub const TICKS_PER_SECOND: i64 = 10_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QualitySetting {
@@ -42,7 +40,8 @@ impl QualitySetting {
 
     pub fn to_omt(self) -> Quality {
         match self {
-            Self::Default => Quality::Default,
+            // Peer-suggested HQ cannot sustain 1080p60 in-process with Resolve.
+            Self::Default => Quality::Medium,
             Self::Low => Quality::Low,
             Self::Medium => Quality::Medium,
             Self::High => Quality::High,
@@ -117,6 +116,7 @@ pub fn fps_to_rational(fps: f64) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openmediatransport::Quality;
 
     #[test]
     fn clamps_source_name() {
@@ -153,5 +153,11 @@ mod tests {
         assert!(!next.needs_sender_restart(&previous));
         next.enabled = false;
         assert!(next.needs_sender_restart(&previous));
+    }
+
+    #[test]
+    fn default_quality_is_medium_for_live_send() {
+        assert_eq!(QualitySetting::Default.to_omt(), Quality::Medium);
+        assert_eq!(QualitySetting::High.to_omt(), Quality::High);
     }
 }

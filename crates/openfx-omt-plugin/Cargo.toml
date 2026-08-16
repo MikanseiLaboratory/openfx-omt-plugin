@@ -15,4 +15,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 openfx.workspace = true
+openfx-pixels.workspace = true
 openmediatransport.workspace = true

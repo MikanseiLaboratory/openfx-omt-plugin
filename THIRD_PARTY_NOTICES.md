@@ -5,10 +5,13 @@ Crate versions are pinned by `Cargo.lock`.
 
 ## OpenFX headers
 
-Vendored from [AcademySoftwareFoundation/openfx](https://github.com/AcademySoftwareFoundation/openfx)
+Come from [openfx-pixels](https://github.com/MikanseiLaboratory/openfx-pixels)
+git revision `c0582afae3c59ec1fe40d463afe6ae7b5ed24801`.
+
+Vendored there from [AcademySoftwareFoundation/openfx](https://github.com/AcademySoftwareFoundation/openfx)
 commit `3de640d6f645fe6e346acd57e568d8b0a5ae4574`.
 
-BSD 3-Clause License. The full text is in `crates/openfx/vendor/LICENSE.md`.
+BSD 3-Clause License. The full text is in that repository at `crates/openfx/vendor/LICENSE.md`.
 
 ```text
 Copyright (c) 2025, OpenFX and contributors to the OpenFX project
@@ -37,6 +40,6 @@ RAII patterns for OpenFX suites, images, and instance data were informed by [kre
 
 See `Cargo.lock` for the complete, version-pinned dependency graph. Runtime and build crates include:
 
-bindgen, bitflags, bytes, cexpr, clang-sys, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either, fastrand, flume, futures-core, futures-sink, glob, if-addrs, itertools, libloading, lock_api, log, mdns-sd, memchr, mio, nom, once_cell, openfx, openfx-omt-plugin, openmediatransport, pin-project-lite, prettyplease, proc-macro2, quote, rayon, rayon-core, regex, regex-automata, regex-syntax, rustc-hash, scopeguard, shlex, socket-pktinfo, socket2, spin, syn, thiserror, thiserror-impl, tracing, tracing-attributes, tracing-core, unicode-ident, vmx, windows-link, windows-sys
+bindgen, bitflags, bytes, cexpr, clang-sys, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either, fastrand, flume, futures-core, futures-sink, glob, if-addrs, itertools, libloading, lock_api, log, mdns-sd, memchr, mio, nom, once_cell, openfx, openfx-omt-plugin, openfx-pixels, openmediatransport, pin-project-lite, prettyplease, proc-macro2, quote, rayon, rayon-core, regex, regex-automata, regex-syntax, rustc-hash, scopeguard, shlex, socket-pktinfo, socket2, spin, syn, thiserror, thiserror-impl, tracing, tracing-attributes, tracing-core, unicode-ident, vmx, windows-link, windows-sys
 
 License texts for crates.io packages can be regenerated with `cargo about generate` when `cargo-about` is available.

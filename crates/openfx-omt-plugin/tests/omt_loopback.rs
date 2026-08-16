@@ -61,7 +61,7 @@ fn video_frame(converted: ConvertedVideo, timestamp: i64) -> MediaFrame {
         frame_rate_n: 60,
         frame_rate_d: 1,
         color_space: ColorSpace::Bt709,
-        data: converted.bgra,
+        data: converted.data,
         ..Default::default()
     }
 }

@@ -1,40 +1,28 @@
 use openfx::image::{ClipImage, RectI};
-use openfx::status::{OfxResult, kOfxStat};
+use openfx_pixels::{
+    ConvertSource, ConvertSpec, ConvertedVideo, MediaError, PixelPool, convert_window_into,
+};
 
-use crate::media::{ConvertedVideo, MediaError, convert_window_to_bgra};
+pub use openfx_pixels::copy_image_window;
 
-pub fn copy_image_window(src: &ClipImage<'_>, dst: &ClipImage<'_>, window: RectI) -> OfxResult<()> {
-    if src.depth != dst.depth || src.components != dst.components {
-        return Err(kOfxStat::ErrUnsupported);
-    }
-    let bpp = src.bytes_per_pixel();
-    let x1 = window.x1.max(src.bounds.x1).max(dst.bounds.x1);
-    let x2 = window.x2.min(src.bounds.x2).min(dst.bounds.x2);
-    let y1 = window.y1.max(src.bounds.y1).max(dst.bounds.y1);
-    let y2 = window.y2.min(src.bounds.y2).min(dst.bounds.y2);
-    if x2 <= x1 || y2 <= y1 {
-        return Ok(());
-    }
-    let width_bytes = (x2 - x1) as usize * bpp;
-    for y in y1..y2 {
-        unsafe {
-            let src_ptr = src.pixel_ptr(x1, y)?;
-            let dst_ptr = dst.pixel_ptr(x1, y)?;
-            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, width_bytes);
-        }
-    }
-    Ok(())
-}
-
-pub fn image_to_bgra(image: &ClipImage<'_>, window: RectI) -> Result<ConvertedVideo, MediaError> {
+pub fn image_to_bgra(
+    image: &ClipImage<'_>,
+    window: RectI,
+    pool: Option<&PixelPool>,
+) -> Result<ConvertedVideo, MediaError> {
+    let scratch = pool.map(PixelPool::take).unwrap_or_default();
     unsafe {
-        convert_window_to_bgra(
-            window,
-            image.bounds,
-            image.row_bytes,
-            image.data,
-            image.depth,
-            image.components,
+        convert_window_into(
+            scratch,
+            ConvertSource {
+                window,
+                bounds: image.bounds,
+                row_bytes: image.row_bytes,
+                data: image.data,
+                depth: image.depth,
+                components: image.components,
+            },
+            ConvertSpec::BGRA_VMX,
         )
     }
 }
@@ -42,8 +30,8 @@ pub fn image_to_bgra(image: &ClipImage<'_>, window: RectI) -> Result<ConvertedVi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::{convert_window_to_bgra, packed_row_to_bgra_pixel};
     use openfx::image::{PixelComponents, PixelDepth};
+    use openfx_pixels::{PackedOrder, convert_window_to_bgra, packed_row_to_pixel};
 
     fn convert_buffer(
         width: i32,
@@ -78,8 +66,9 @@ mod tests {
             &src,
         );
         let last_row = ((16 - 1) * 16 * 4) as usize;
-        assert_eq!(&converted.bgra[last_row..last_row + 4], &[30, 20, 10, 40]);
+        assert_eq!(&converted.data[last_row..last_row + 4], &[30, 20, 10, 40]);
         assert!(converted.has_alpha);
+        assert_eq!(converted.order, PackedOrder::Bgra);
     }
 
     #[test]
@@ -87,7 +76,7 @@ mod tests {
         let src = [1u8, 2, 3].repeat(16 * 16);
         let converted =
             convert_buffer(16, 16, PixelDepth::Byte, PixelComponents::Rgb, 16 * 3, &src);
-        assert_eq!(converted.bgra[3], 255);
+        assert_eq!(converted.data[3], 255);
         assert!(!converted.has_alpha);
     }
 
@@ -105,7 +94,7 @@ mod tests {
         );
         let last_row = ((16 - 1) * 16 * 4) as usize;
         assert_eq!(
-            &converted.bgra[last_row..last_row + 4],
+            &converted.data[last_row..last_row + 4],
             &[0x30, 0x20, 0x10, 0xff]
         );
 
@@ -128,7 +117,7 @@ mod tests {
             &srcf,
         );
         let last_row = ((16 - 1) * 16 * 4) as usize;
-        assert_eq!(&converted.bgra[last_row..last_row + 4], &[0, 0, 255, 255]);
+        assert_eq!(&converted.data[last_row..last_row + 4], &[0, 0, 255, 255]);
     }
 
     #[test]
@@ -157,13 +146,18 @@ mod tests {
             )
         }
         .unwrap();
-        assert_eq!(&converted.bgra[0..4], &[7, 8, 9, 255]);
+        assert_eq!(&converted.data[0..4], &[7, 8, 9, 255]);
     }
 
     #[test]
     fn packed_pixel_helper() {
         assert_eq!(
-            packed_row_to_bgra_pixel(PixelDepth::Byte, PixelComponents::Rgb, &[1, 2, 3]),
+            packed_row_to_pixel(
+                PackedOrder::Bgra,
+                PixelDepth::Byte,
+                PixelComponents::Rgb,
+                &[1, 2, 3]
+            ),
             [3, 2, 1, 255]
         );
     }
