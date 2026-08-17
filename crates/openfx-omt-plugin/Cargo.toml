@@ -1,0 +1,19 @@
+[package]
+name = "openfx-omt-plugin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "OpenFX filter that live-sends video over Open Media Transport"
+
+[lib]
+name = "openfx_omt"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+openfx.workspace = true
+openfx-pixels.workspace = true
+openmediatransport.workspace = true
