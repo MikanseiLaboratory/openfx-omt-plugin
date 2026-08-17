@@ -1,8 +1,10 @@
 use std::sync::OnceLock;
 
 use openfx::MultiThread;
-use openfx::image::{ClipImage, PixelComponents, RectI};
-use openfx::status::{OfxResult, kOfxStat};
+use openfx::image::{ClipImage, RectI};
+#[cfg(test)]
+use openfx::image::PixelComponents;
+use openfx::status::OfxResult;
 use openfx_pixels::{
     ConvertHost, ConvertSource, ConvertSpec, ConvertedVideo, MediaError, PixelPool, RowWriter,
     convert_window_into,
@@ -22,20 +24,25 @@ fn live_spec() -> ConvertSpec {
 }
 
 #[inline(always)]
+#[cfg(test)]
 fn source_has_alpha(components: PixelComponents) -> bool {
     matches!(components, PixelComponents::Rgba)
 }
 
-fn media_status(err: MediaError) -> openfx::OfxStatus {
-    eprintln!("{LOG_TAG}: {err}");
-    match err {
-        MediaError::MissingMultiThread => kOfxStat::ErrMissingHostFeature,
-        _ => kOfxStat::Failed,
-    }
+/// Host SMP oversubscription on 8-core/16-thread CPUs thrashes the float copy.
+const MAX_OFX_THREADS: u32 = 8;
+
+fn log_serial_once(reason: &str) {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    let _ = ONCE.get_or_init(|| {
+        eprintln!("{LOG_TAG}: {reason}; finishing fused pass serially so video still sends");
+    });
 }
 
 /// Passthrough copy plus live BGRA convert. Copy and convert share one source scan
-/// (AVX2 row copy + SIMD row writer). Parallel rows use the host `multiThread` pool.
+/// (AVX2 row copy + SIMD row writer). Parallel rows use the host `multiThread` pool
+/// when the render thread is allowed to spawn; otherwise the same fused pass runs
+/// serially so OFX output and OMT send still complete.
 pub fn pass_bgra(
     source: &ClipImage<'_>,
     output: &ClipImage<'_>,
@@ -49,9 +56,14 @@ pub fn pass_bgra(
         return Ok(None);
     }
 
-    pass_copy_and_convert(source, output, window, pool, multithread, live_spec())
-        .map(Some)
-        .map_err(media_status)
+    match pass_copy_and_convert(source, output, window, pool, multithread, live_spec()) {
+        Ok(converted) => Ok(Some(converted)),
+        Err(err) => {
+            eprintln!("{LOG_TAG}: {err}; passthrough only this frame");
+            copy_image_window(source, output, window)?;
+            Ok(None)
+        }
+    }
 }
 
 fn pass_copy_and_convert(
@@ -157,7 +169,7 @@ fn pass_copy_and_convert(
         height,
         stride: stride as i32,
         data: packed,
-        has_alpha: source_has_alpha(source.components),
+        has_alpha: false,
         order: spec.order,
     })
 }
@@ -177,11 +189,32 @@ fn convert_live(
         depth: image.depth,
         components: image.components,
     };
-    let host = ConvertHost { multithread };
+    let mut spec = spec;
+    if multithread.is_spawned_thread() {
+        log_serial_once("render thread is already an OFX spawned thread");
+        spec.parallel_rows = false;
+    }
     let scratch = pool.map(PixelPool::take).unwrap_or_default();
-    let mut video = unsafe { convert_window_into(scratch, source, spec, Some(host)) }?;
-    video.has_alpha = source_has_alpha(image.components);
-    Ok(video)
+    let video = unsafe {
+        match convert_window_into(
+            scratch,
+            source,
+            spec,
+            spec.parallel_rows.then_some(ConvertHost { multithread }),
+        ) {
+            Ok(video) => video,
+            Err(MediaError::ParallelFailed) => {
+                log_serial_once("OfxMultiThreadSuite::multiThread failed");
+                spec.parallel_rows = false;
+                convert_window_into(Vec::new(), source, spec, None)?
+            }
+            Err(err) => return Err(err),
+        }
+    };
+    Ok(ConvertedVideo {
+        has_alpha: false,
+        ..video
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -256,6 +289,7 @@ unsafe fn pass_rows_serial(ctx: PassCtx) {
     for y in ctx.y1..ctx.y2 {
         unsafe { pass_one_y(y, &ctx) };
     }
+    sfence();
 }
 
 #[inline]
@@ -268,24 +302,36 @@ fn row_band(y1: i32, y2: i32, thread_index: u32, thread_max: u32) -> (i32, i32) 
     (start, end)
 }
 
-fn ofx_cpus(multithread: &MultiThread) -> Result<u32, MediaError> {
+fn ofx_cpus(multithread: &MultiThread) -> u32 {
     static CPUS: OnceLock<u32> = OnceLock::new();
     if let Some(n) = CPUS.get() {
-        return Ok(*n);
+        return *n;
     }
     let n = multithread
         .num_cpus()
-        .map_err(|_| MediaError::ParallelFailed)?
-        .max(1);
-    Ok(*CPUS.get_or_init(|| n))
+        .ok()
+        .unwrap_or(1)
+        .max(1)
+        .min(MAX_OFX_THREADS);
+    *CPUS.get_or_init(|| n)
 }
 
 fn pass_rows(multithread: &MultiThread, ctx: PassCtx) -> Result<(), MediaError> {
-    if (ctx.y2 - ctx.y1) <= 1 {
+    let rows = ctx.y2 - ctx.y1;
+    if rows <= 1 {
         unsafe { pass_rows_serial(ctx) };
         return Ok(());
     }
-    unsafe { pass_rows_ofx(multithread, ctx) }
+    if multithread.is_spawned_thread() {
+        log_serial_once("render thread is already an OFX spawned thread");
+        unsafe { pass_rows_serial(ctx) };
+        return Ok(());
+    }
+    if unsafe { pass_rows_ofx(multithread, ctx) }.is_err() {
+        log_serial_once("OfxMultiThreadSuite::multiThread failed");
+        unsafe { pass_rows_serial(ctx) };
+    }
+    Ok(())
 }
 
 struct PassWork {
@@ -302,11 +348,12 @@ unsafe extern "C" fn pass_rows_worker(
     for y in start..end {
         unsafe { pass_one_y(y, &work.ctx) };
     }
+    sfence();
 }
 
 unsafe fn pass_rows_ofx(multithread: &MultiThread, ctx: PassCtx) -> Result<(), MediaError> {
     let rows = (ctx.y2 - ctx.y1).max(1) as u32;
-    let n_threads = ofx_cpus(multithread)?.min(rows).max(1);
+    let n_threads = ofx_cpus(multithread).min(rows).max(1);
     let work = PassWork { ctx };
     multithread
         .parallel(
@@ -331,11 +378,23 @@ fn has_avx2() -> bool {
 }
 
 #[inline(always)]
+fn sfence() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_sfence();
+    }
+}
+
+#[inline(always)]
 unsafe fn copy_row(src: *const u8, dst: *mut u8, len: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         if len >= 64 && has_avx2() {
-            unsafe { copy_row_avx2(src, dst, len) };
+            if (dst as usize).is_multiple_of(32) {
+                unsafe { copy_row_avx2_stream(src, dst, len) };
+            } else {
+                unsafe { copy_row_avx2(src, dst, len) };
+            }
             return;
         }
     }
@@ -361,6 +420,31 @@ unsafe fn copy_row_avx2(src: *const u8, dst: *mut u8, len: usize) {
         while i + 32 <= len {
             let v = _mm256_loadu_si256(src.add(i) as *const __m256i);
             _mm256_storeu_si256(dst.add(i) as *mut __m256i, v);
+            i += 32;
+        }
+        if i < len {
+            std::ptr::copy_nonoverlapping(src.add(i), dst.add(i), len - i);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_row_avx2_stream(src: *const u8, dst: *mut u8, len: usize) {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let mut i = 0;
+        while i + 64 <= len {
+            let v0 = _mm256_loadu_si256(src.add(i) as *const __m256i);
+            let v1 = _mm256_loadu_si256(src.add(i + 32) as *const __m256i);
+            _mm256_stream_si256(dst.add(i) as *mut __m256i, v0);
+            _mm256_stream_si256(dst.add(i + 32) as *mut __m256i, v1);
+            i += 64;
+        }
+        while i + 32 <= len {
+            let v = _mm256_loadu_si256(src.add(i) as *const __m256i);
+            _mm256_stream_si256(dst.add(i) as *mut __m256i, v);
             i += 32;
         }
         if i < len {
