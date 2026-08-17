@@ -5,6 +5,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $isAdmin) {
+    $relaunch = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $PSCommandPath
+    )
+    if ($PSBoundParameters.ContainsKey("BundlePath")) {
+        $relaunch += @("-BundlePath", $BundlePath)
+    }
+    if ($PSBoundParameters.ContainsKey("PluginsDir")) {
+        $relaunch += @("-PluginsDir", $PluginsDir)
+    }
+    $proc = Start-Process -FilePath "powershell.exe" -Verb RunAs -Wait -PassThru -ArgumentList $relaunch
+    exit $proc.ExitCode
+}
+
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $bundleName = "OpenFXOMT.ofx.bundle"
 if (-not $BundlePath) {
