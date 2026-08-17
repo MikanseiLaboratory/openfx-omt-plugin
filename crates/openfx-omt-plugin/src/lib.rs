@@ -44,7 +44,7 @@ const _: &str = PLUGIN_IDENTIFIER;
 
 struct Shared {
     suites: Suites,
-    multithread: Option<MultiThread>,
+    multithread: MultiThread,
 }
 
 static HOST: OnceLock<Host> = OnceLock::new();
@@ -98,7 +98,7 @@ fn shared() -> OfxResult<&'static Shared> {
 fn action_load() -> OfxResult<()> {
     let host = *HOST.get().ok_or(kOfxStat::Failed)?;
     let suites = unsafe { Suites::fetch(host) }?;
-    let multithread = unsafe { MultiThread::fetch(host) }.ok();
+    let multithread = unsafe { MultiThread::fetch(host) }?;
     let _ = SHARED.set(Shared {
         suites,
         multithread,
@@ -237,35 +237,30 @@ fn action_render(effect: OfxImageEffectHandle, in_args: OfxPropertySetHandle) ->
     let output_clip = suites.clip_handle(effect, kOfxImageEffectOutputClipName)?;
     let source = unsafe { ClipImage::fetch(suites, source_clip, time) }?;
     let output = unsafe { ClipImage::fetch(suites, output_clip, time) }?;
-    pixels::copy_image_window(&source, &output, window)?;
-
     let instance = get_instance_data::<PluginInstance>(suites, effect)?;
-    let _ = instance.sync_from_params(effect, time);
-    if !instance.config_snapshot().enabled {
-        return Ok(());
-    }
-
-    let fps = suites
-        .clip_properties(source_clip)
-        .ok()
-        .and_then(|props| props.get_double(kOfxImageEffectPropFrameRate, 0).ok())
-        .unwrap_or(60.0);
-    let (fps_n, fps_d) = fps_to_rational(fps);
-    match pixels::image_to_bgra(
+    let converted = pixels::pass_bgra(
         &source,
+        &output,
         window,
         Some(instance.bgra_pool()),
-        shared.multithread.as_ref(),
-    ) {
-        Ok(converted) => {
-            let mut job = VideoJob::from(converted);
-            job.timestamp = instance.next_timestamp();
-            job.fps_n = fps_n;
-            job.fps_d = fps_d;
-            job.ofx_time = time;
-            instance.push_video(job);
-        }
-        Err(err) => eprintln!("OMT frame convert skipped: {err}"),
+        &shared.multithread,
+        instance.is_enabled(),
+    )?;
+    if let Some(converted) = converted {
+        let (fps_n, fps_d) = instance.cached_fps(|| {
+            let fps = suites
+                .clip_properties(source_clip)
+                .ok()
+                .and_then(|props| props.get_double(kOfxImageEffectPropFrameRate, 0).ok())
+                .unwrap_or(60.0);
+            fps_to_rational(fps)
+        });
+        let mut job = VideoJob::from(converted);
+        job.timestamp = instance.next_timestamp();
+        job.fps_n = fps_n;
+        job.fps_d = fps_d;
+        job.ofx_time = time;
+        instance.push_video(job);
     }
     Ok(())
 }
