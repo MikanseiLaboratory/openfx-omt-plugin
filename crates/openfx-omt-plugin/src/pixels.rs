@@ -1,16 +1,36 @@
+use openfx::MultiThread;
 use openfx::image::{ClipImage, RectI};
 use openfx_pixels::{
-    ConvertSource, ConvertSpec, ConvertedVideo, MediaError, PixelPool, convert_window_into,
+    ConvertHost, ConvertSource, ConvertSpec, ConvertedVideo, MediaError, PixelPool,
+    convert_window_into,
 };
 
 pub use openfx_pixels::copy_image_window;
+
+fn convert_host_spec<'a>(
+    spec: ConvertSpec,
+    multithread: Option<&'a MultiThread>,
+) -> (ConvertSpec, Option<ConvertHost<'a>>) {
+    match multithread {
+        Some(multithread) => (spec, Some(ConvertHost { multithread })),
+        None => (
+            ConvertSpec {
+                parallel_rows: false,
+                ..spec
+            },
+            None,
+        ),
+    }
+}
 
 pub fn image_to_bgra(
     image: &ClipImage<'_>,
     window: RectI,
     pool: Option<&PixelPool>,
+    multithread: Option<&MultiThread>,
 ) -> Result<ConvertedVideo, MediaError> {
     let scratch = pool.map(PixelPool::take).unwrap_or_default();
+    let (spec, host) = convert_host_spec(ConvertSpec::BGRA_VMX, multithread);
     unsafe {
         convert_window_into(
             scratch,
@@ -22,7 +42,8 @@ pub fn image_to_bgra(
                 depth: image.depth,
                 components: image.components,
             },
-            ConvertSpec::BGRA_VMX,
+            spec,
+            host,
         )
     }
 }

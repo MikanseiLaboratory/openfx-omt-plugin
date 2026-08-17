@@ -4,7 +4,7 @@
 
 ## 導入
 
-1. `OpenFXOMT.ofx.bundle` を `C:\Program Files\Common Files\OFX\Plugins` にコピーする
+1. `OpenFXOMT.ofx.bundle` を `C:\Program Files\Common Files\OFX\Plugins` にコピーする（`./scripts/install.ps1` でも可）
 2. Resolve を起動し直す
 3. Fusion または Color の OpenFX 一覧に **Mikansei Laboratory / OMT Output** が出ることを確認する
 
