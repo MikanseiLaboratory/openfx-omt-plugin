@@ -1,5 +1,6 @@
 mod config;
 mod instance;
+mod omt_file_log;
 mod params;
 mod pixels;
 mod sender;
@@ -96,6 +97,7 @@ fn shared() -> OfxResult<&'static Shared> {
 }
 
 fn action_load() -> OfxResult<()> {
+    omt_file_log::init();
     let host = *HOST.get().ok_or(kOfxStat::Failed)?;
     let suites = unsafe { Suites::fetch(host) }?;
     let multithread = unsafe { MultiThread::fetch(host) }?;
