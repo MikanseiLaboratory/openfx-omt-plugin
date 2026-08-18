@@ -35,7 +35,9 @@ const MAX_OFX_THREADS: u32 = 8;
 fn log_serial_once(reason: &str) {
     static ONCE: OnceLock<()> = OnceLock::new();
     let _ = ONCE.get_or_init(|| {
-        eprintln!("{LOG_TAG}: {reason}; finishing fused pass serially so video still sends");
+        crate::omt_file_log::eprint_and_file(&format!(
+            "{LOG_TAG}: {reason}; finishing fused pass serially so video still sends"
+        ));
     });
 }
 
@@ -59,7 +61,9 @@ pub fn pass_bgra(
     match pass_copy_and_convert(source, output, window, pool, multithread, live_spec()) {
         Ok(converted) => Ok(Some(converted)),
         Err(err) => {
-            eprintln!("{LOG_TAG}: {err}; passthrough only this frame");
+            crate::omt_file_log::eprint_and_file(&format!(
+                "{LOG_TAG}: {err}; passthrough only this frame"
+            ));
             copy_image_window(source, output, window)?;
             Ok(None)
         }

@@ -121,7 +121,7 @@ impl SendSession {
         if let Some(discovery) = discovery.as_mut()
             && let Err(e) = discovery.register(&config.source_name, sender.port())
         {
-            eprintln!("OMT DNS-SD register failed: {e}");
+            crate::omt_file_log::eprint_and_file(&format!("OMT DNS-SD register failed: {e}"));
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -201,7 +201,9 @@ fn sender_loop(
         let had_job = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             drain_accepts(&mut sender);
             if let Err(e) = sender.poll_peer_metadata() {
-                eprintln!("OMT poll_peer_metadata failed: {e}");
+                crate::omt_file_log::eprint_and_file(&format!(
+                    "OMT poll_peer_metadata failed: {e}"
+                ));
             }
             let current_quality = *quality.lock().unwrap_or_else(|e| e.into_inner());
             if applied_quality != Some(current_quality) {
@@ -224,7 +226,7 @@ fn sender_loop(
                     last_hash = 0;
                 }
                 if let Err(e) = sender.send_video(video_frame(job)) {
-                    eprintln!("OMT send_video failed: {e}");
+                    crate::omt_file_log::eprint_and_file(&format!("OMT send_video failed: {e}"));
                 }
                 true
             } else {
@@ -235,7 +237,9 @@ fn sender_loop(
             Ok(true) => {}
             Ok(false) => thread::sleep(Duration::from_millis(1)),
             Err(_) => {
-                eprintln!("OMT sender loop panicked; keeping sender thread alive");
+                crate::omt_file_log::eprint_and_file(
+                    "OMT sender loop panicked; keeping sender thread alive",
+                );
                 thread::sleep(Duration::from_millis(1));
             }
         }
@@ -254,7 +258,7 @@ fn drain_accepts(sender: &mut Sender) {
             Ok(true) => {}
             Ok(false) => break,
             Err(e) => {
-                eprintln!("OMT poll_accept failed: {e}");
+                crate::omt_file_log::eprint_and_file(&format!("OMT poll_accept failed: {e}"));
                 break;
             }
         }

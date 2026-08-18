@@ -103,7 +103,9 @@ impl PluginInstance {
             *session = None;
             match SendSession::start_with_pool(config, Arc::clone(&self.bgra_pool)) {
                 Ok(started) => *session = Some(started),
-                Err(err) => eprintln!("OMT sender start failed: {err}"),
+                Err(err) => {
+                    crate::omt_file_log::eprint_and_file(&format!("OMT sender start failed: {err}"))
+                }
             }
             return;
         }
