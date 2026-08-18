@@ -1,9 +1,9 @@
 use std::sync::OnceLock;
 
 use openfx::MultiThread;
-use openfx::image::{ClipImage, RectI};
 #[cfg(test)]
 use openfx::image::PixelComponents;
+use openfx::image::{ClipImage, RectI};
 use openfx::status::OfxResult;
 use openfx_pixels::{
     ConvertHost, ConvertSource, ConvertSpec, ConvertedVideo, MediaError, PixelPool, RowWriter,
