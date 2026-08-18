@@ -311,8 +311,7 @@ fn ofx_cpus(multithread: &MultiThread) -> u32 {
         .num_cpus()
         .ok()
         .unwrap_or(1)
-        .max(1)
-        .min(MAX_OFX_THREADS);
+        .clamp(1, MAX_OFX_THREADS);
     *CPUS.get_or_init(|| n)
 }
 
