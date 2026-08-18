@@ -10,8 +10,8 @@ authors = ["MikanseiLaboratory"]
 repository = "https://github.com/MikanseiLaboratory/openfx-omt-plugin"
 
 [workspace.dependencies]
-openfx = { git = "https://github.com/MikanseiLaboratory/openfx-pixels", rev = "c0582afae3c59ec1fe40d463afe6ae7b5ed24801" }
-openfx-pixels = { git = "https://github.com/MikanseiLaboratory/openfx-pixels", rev = "c0582afae3c59ec1fe40d463afe6ae7b5ed24801" }
+openfx = { git = "https://github.com/MikanseiLaboratory/openfx-pixels", rev = "8e12b181576fddcc5555c0b205667cb6f909dcea" }
+openfx-pixels = { git = "https://github.com/MikanseiLaboratory/openfx-pixels", rev = "8e12b181576fddcc5555c0b205667cb6f909dcea" }
 openmediatransport = { git = "https://github.com/MikanseiLaboratory/openmediatransport-rs", rev = "55ffd08ab899f8017056886157fb0d130ab36d5c" }
 
 [profile.release]

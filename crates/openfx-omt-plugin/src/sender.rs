@@ -209,17 +209,20 @@ fn sender_loop(
                 applied_quality = Some(current_quality);
             }
             if let Some(job) = video_slot.take() {
-                let hash = packed_frame_hash(job.width, job.height, &job.bgra);
-                if job.ofx_time == last_time
-                    && last_wh == (job.width, job.height)
-                    && hash == last_hash
-                {
-                    pool.release(job.bgra);
-                    return true;
+                // Playback always has a new OFX time — skip the 8 MiB CRC.
+                // Pause/scrub repeats ofx_time; hash only then.
+                if job.ofx_time == last_time && last_wh == (job.width, job.height) {
+                    let hash = packed_frame_hash(job.width, job.height, &job.bgra);
+                    if hash == last_hash {
+                        pool.release(job.bgra);
+                        return true;
+                    }
+                    last_hash = hash;
+                } else {
+                    last_time = job.ofx_time;
+                    last_wh = (job.width, job.height);
+                    last_hash = 0;
                 }
-                last_time = job.ofx_time;
-                last_wh = (job.width, job.height);
-                last_hash = hash;
                 if let Err(e) = sender.send_video(video_frame(job)) {
                     eprintln!("OMT send_video failed: {e}");
                 }

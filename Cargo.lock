@@ -243,7 +243,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "openfx"
 version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/openfx-pixels?rev=c0582afae3c59ec1fe40d463afe6ae7b5ed24801#c0582afae3c59ec1fe40d463afe6ae7b5ed24801"
+source = "git+https://github.com/MikanseiLaboratory/openfx-pixels?rev=8e12b181576fddcc5555c0b205667cb6f909dcea#8e12b181576fddcc5555c0b205667cb6f909dcea"
 dependencies = [
  "bindgen",
 ]
@@ -260,7 +260,7 @@ dependencies = [
 [[package]]
 name = "openfx-pixels"
 version = "0.1.0"
-source = "git+https://github.com/MikanseiLaboratory/openfx-pixels?rev=c0582afae3c59ec1fe40d463afe6ae7b5ed24801#c0582afae3c59ec1fe40d463afe6ae7b5ed24801"
+source = "git+https://github.com/MikanseiLaboratory/openfx-pixels?rev=8e12b181576fddcc5555c0b205667cb6f909dcea#8e12b181576fddcc5555c0b205667cb6f909dcea"
 dependencies = [
  "openfx",
 ]
